@@ -1,5 +1,7 @@
 # AspectSlide
 
+[![Build and test](https://github.com/kperkins6/AspectSlide/actions/workflows/ci.yml/badge.svg)](https://github.com/kperkins6/AspectSlide/actions/workflows/ci.yml)
+
 **A monitor-aware wallpaper slideshow for Windows 11.** Pick one local photo folder and AspectSlide changes all connected monitors on a shared interval. Portrait photos go to vertical screens, landscape photos to horizontal screens, and each monitor gets a different file when the library has enough choices.
 
 Windows' built-in slideshow can put the same landscape image on a portrait screen, or vice versa. AspectSlide keeps the familiar folder, interval, and Fill/Fit controls while choosing a better image for each display.

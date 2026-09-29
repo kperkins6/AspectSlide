@@ -1,4 +1,5 @@
 using AspectSlide.UI;
+using System.Runtime.InteropServices;
 
 namespace AspectSlide.Tests;
 
@@ -16,6 +17,10 @@ public sealed class StartupShortcutTests
         Assert.False(File.Exists(link));
         shortcut.SetEnabled(true);
         Assert.True(File.Exists(link));
+        dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!)!;
+        dynamic saved = shell.CreateShortcut(link);
+        try { Assert.Equal(StartupShortcut.BackgroundArgument, (string)saved.Arguments); }
+        finally { Marshal.FinalReleaseComObject(saved); Marshal.FinalReleaseComObject(shell); }
         shortcut.SetEnabled(false);
         Assert.False(File.Exists(link));
 

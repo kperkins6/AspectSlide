@@ -229,7 +229,7 @@ public sealed class SlideshowController
                     foreach (var (id, photo) in chosen)
                     {
                         try { prepared[id] = await Task.Run(() => preparer.Prepare(photo)); }
-                        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or OutOfMemoryException)
+                        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or OutOfMemoryException or System.Runtime.InteropServices.ExternalException)
                         { sessionRejected.Add(photo.Path); failed = true; break; }
                     }
                     if (!failed) break;

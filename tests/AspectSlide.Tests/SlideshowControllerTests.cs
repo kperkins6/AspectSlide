@@ -168,6 +168,22 @@ public sealed class SlideshowControllerTests
     }
 
     [Fact]
+    public async Task DecoderErrorDuringPreparationDoesNotAbortChangeNow()
+    {
+        using var fixture = new ControllerFixture();
+        bool first = true;
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            if (first) { first = false; throw new System.Runtime.InteropServices.ExternalException("decode failed"); }
+            return null;
+        };
+
+        await fixture.Controller.ChangeNowAsync();
+
+        Assert.Equal(2, fixture.Platform.Assignments.Count);
+    }
+
+    [Fact]
     public async Task CachePruningKeepsTheWallpaperOfAMonitorWhoseWriteFailed()
     {
         using var fixture = new ControllerFixture();

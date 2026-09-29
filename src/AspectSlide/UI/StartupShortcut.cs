@@ -6,6 +6,7 @@ namespace AspectSlide.UI;
 
 public sealed class StartupShortcut
 {
+    public const string BackgroundArgument = "--background";
     private readonly string path;
     private readonly string executable;
     public StartupShortcut(string startupDirectory, string executablePath)
@@ -20,17 +21,16 @@ public sealed class StartupShortcut
     {
         if (enabled)
         {
-            if (File.Exists(path))
-            {
-                if (!IsOwnLink()) throw new IOException("A different shortcut already uses AspectSlide.lnk.");
-                return;
-            }
+            bool exists = File.Exists(path);
+            if (exists && !IsOwnLink()) throw new IOException("A different shortcut already uses AspectSlide.lnk.");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var link = CreateLink();
             try
             {
+                if (exists) ((IPersistFile)link).Load(path, 0);
                 link.SetPath(executable);
                 link.SetWorkingDirectory(Path.GetDirectoryName(executable)!);
+                link.SetArguments(BackgroundArgument);
                 ((IPersistFile)link).Save(path, true);
             }
             finally { Marshal.FinalReleaseComObject(link); }

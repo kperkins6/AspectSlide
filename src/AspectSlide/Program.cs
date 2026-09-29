@@ -14,17 +14,18 @@ internal static class Program
     private static readonly IntPtr Broadcast = new(0xffff);
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        bool background = args.Contains(StartupShortcut.BackgroundArgument, StringComparer.OrdinalIgnoreCase);
         using var single = new Mutex(initiallyOwned: true, "Local\\AspectSlide.OneInstance.54F4C0E6", out bool first);
         if (!first)
         {
-            PostMessage(Broadcast, RegisterWindowMessage(ShowMessageName), IntPtr.Zero, IntPtr.Zero);
+            if (!background) PostMessage(Broadcast, RegisterWindowMessage(ShowMessageName), IntPtr.Zero, IntPtr.Zero);
             return;
         }
         ApplicationConfiguration.Initialize();
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-        using var app = new TrayContext();
+        using var app = new TrayContext(background);
         Application.Run(app);
     }
 }

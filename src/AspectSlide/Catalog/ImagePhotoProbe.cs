@@ -1,5 +1,6 @@
 using AspectSlide.Model;
 using System.Drawing;
+using System.Runtime.InteropServices;
 
 namespace AspectSlide.Catalog;
 
@@ -17,7 +18,7 @@ public sealed class ImagePhotoProbe : IPhotoProbe
                 turn ? image.Width : image.Height, orientation);
             return photo.Width > 0 && photo.Height > 0;
         }
-        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or OutOfMemoryException)
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or OutOfMemoryException or ExternalException)
         {
             return false;
         }

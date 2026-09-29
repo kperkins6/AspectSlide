@@ -4,7 +4,7 @@ AspectSlide is a small Windows 11 tray app that changes wallpapers on connected 
 
 ## Use
 
-1. Run `AspectSlide.exe`. Its icon appears in the notification area. Double-click the icon or choose **Settings** from its menu.
+1. Run `AspectSlide.exe`. Opening it manually shows Settings. When Start at sign-in is enabled, the app starts quietly in the notification area after a folder has been chosen. Double-click the tray icon or choose **Settings** from its menu to reopen the window.
 2. Choose a local photo folder. Ordinary subfolders are included. Set the interval in minutes (1 to 1440) and choose **Fill** or **Fit**. Fill/Fit is a Windows-wide wallpaper setting.
 3. Use **Change now** for an immediate batch, **Pause** to stop scheduled changes, and **Restore previous** to return to the wallpapers that were present before AspectSlide's first change. Restore pauses the slideshow.
 4. Enable **Start at sign-in** only if wanted. It creates one shortcut in your own Startup folder; disabling it removes that shortcut. Closing the settings window leaves the tray app running. **Exit** leaves the current wallpapers in place.

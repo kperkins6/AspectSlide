@@ -14,6 +14,8 @@ public sealed class SettingsForm : Form
     private readonly StartupShortcut startup;
     private readonly IWallpaperPlatform platform;
     private readonly Action exit;
+    private readonly Func<string, Task> launchWindowsSettings;
+    private readonly Func<IWin32Window, string?> selectFolder;
     private readonly TextBox folderText = new() { ReadOnly = true, Dock = DockStyle.Fill };
     private readonly NumericUpDown minutes = new() { Minimum = 1, Maximum = 1440, Dock = DockStyle.Left, Width = 90 };
     private readonly ComboBox fit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left, Width = 100 };
@@ -25,7 +27,8 @@ public sealed class SettingsForm : Form
     private bool updatingSignIn;
 
     public SettingsForm(AppSettings settings, SettingsStore store, SlideshowController controller,
-        StartupShortcut startup, IWallpaperPlatform platform, Action exit)
+        StartupShortcut startup, IWallpaperPlatform platform, Action exit,
+        Func<string, Task>? launchWindowsSettings = null, Func<IWin32Window, string?>? selectFolder = null)
     {
         this.settings = settings;
         this.store = store;
@@ -33,6 +36,8 @@ public sealed class SettingsForm : Form
         this.startup = startup;
         this.platform = platform;
         this.exit = exit;
+        this.launchWindowsSettings = launchWindowsSettings ?? OpenWindowsSettings;
+        this.selectFolder = selectFolder ?? PickFolder;
         Text = "AspectSlide settings";
         MinimumSize = new Size(570, 530);
         Size = new Size(660, 600);
@@ -64,12 +69,16 @@ public sealed class SettingsForm : Form
 
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
         AddButton(actions, "Change now", ChangeNowWithWarningAsync);
-        pause.Click += (_, _) => { controller.SetPaused(!settings.Paused); RefreshStatus(); };
+        pause.Click += (_, _) =>
+        {
+            try { controller.SetPaused(!settings.Paused); RefreshStatus(); }
+            catch (Exception ex) { ShowError(ex); }
+        };
         actions.Controls.Add(pause);
         AddButton(actions, "Check again", ChangeNowWithWarningAsync);
         AddButton(actions, "Restore previous", async () => await controller.RestorePreviousAsync());
-        AddButton(actions, "Windows colors", () => OpenWindowsSettings("ms-settings:colors"));
-        AddButton(actions, "Windows background", () => OpenWindowsSettings("ms-settings:personalization-background"));
+        AddButton(actions, "Windows colors", () => this.launchWindowsSettings("ms-settings:colors"));
+        AddButton(actions, "Windows background", () => this.launchWindowsSettings("ms-settings:personalization-background"));
         AddButton(actions, "Exit", () => { exit(); return Task.CompletedTask; });
         layout.Controls.Add(actions, 0, 5);
         layout.SetColumnSpan(actions, 2);
@@ -92,8 +101,8 @@ public sealed class SettingsForm : Form
         fit.SelectedItem = settings.Fit.ToString();
         fit.SelectedIndexChanged += (_, _) =>
         {
-            settings.Fit = fit.SelectedIndex == 1 ? WallpaperFit.Fit : WallpaperFit.Fill;
-            store.Save(settings);
+            try { settings.Fit = fit.SelectedIndex == 1 ? WallpaperFit.Fit : WallpaperFit.Fill; store.Save(settings); }
+            catch (Exception ex) { ShowError(ex); }
         };
         signIn.Checked = settings.StartAtSignIn;
         signIn.CheckedChanged += (_, _) =>
@@ -140,11 +149,11 @@ public sealed class SettingsForm : Form
 
     private async Task ChooseFolderAsync()
     {
-        using var picker = new FolderBrowserDialog { Description = "Choose your local photo folder", UseDescriptionForTitle = true };
-        if (picker.ShowDialog(this) != DialogResult.OK) return;
         try
         {
-            string path = LocalFolderValidator.Validate(picker.SelectedPath);
+            string? selected = selectFolder(this);
+            if (selected is null) return;
+            string path = LocalFolderValidator.Validate(selected);
             if (!settings.OriginalCaptured && platform.GetAttachedDisplays().Any(d => string.IsNullOrEmpty(platform.GetWallpaper(d.Id))))
             {
                 var proceed = MessageBox.Show(this,
@@ -158,6 +167,12 @@ public sealed class SettingsForm : Form
             RefreshStatus();
         }
         catch (Exception ex) { ShowError(ex); }
+    }
+
+    private static string? PickFolder(IWin32Window owner)
+    {
+        using var picker = new FolderBrowserDialog { Description = "Choose your local photo folder", UseDescriptionForTitle = true };
+        return picker.ShowDialog(owner) == DialogResult.OK ? picker.SelectedPath : null;
     }
 
     public void RefreshStatus()
@@ -209,7 +224,7 @@ public sealed class SettingsForm : Form
             return new Bitmap(original, new Size(Math.Max(1, (int)(original.Width * scale)),
                 Math.Max(1, (int)(original.Height * scale))));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OutOfMemoryException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OutOfMemoryException or System.Runtime.InteropServices.ExternalException)
         { return null; }
     }
 

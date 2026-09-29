@@ -2,6 +2,7 @@ using AspectSlide.Catalog;
 using AspectSlide.Model;
 using System.Drawing;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 
 namespace AspectSlide.Tests;
 
@@ -145,12 +146,49 @@ public sealed class PhotoCatalogTests
         Assert.Throws<FileNotFoundException>(() => cache.Prepare(new PhotoInfo(source, 100, 50)));
     }
 
+    [Fact]
+    public void MalformedImageIsRejectedWithoutAnUnhandledDecoderException()
+    {
+        using var folder = new TemporaryFolder();
+        string path = System.IO.Path.Combine(folder.Path, "corrupt.jpg");
+        File.WriteAllText(path, "This is not an image.");
+
+        Assert.False(new ImagePhotoProbe().TryRead(path, out _));
+    }
+
+    [Fact]
+    public void DecoderFailureSkipsOneEntryAndContinuesTheScan()
+    {
+        using var folder = new TemporaryFolder();
+        File.WriteAllText(System.IO.Path.Combine(folder.Path, "corrupt.jpg"), "bad");
+        File.WriteAllText(System.IO.Path.Combine(folder.Path, "good.jpg"), "good");
+        using var catalog = new PhotoCatalog(new ThrowingProbe());
+
+        var photos = catalog.Scan(folder.Path);
+
+        Assert.Equal("good.jpg", System.IO.Path.GetFileName(Assert.Single(photos).Path));
+    }
+
+    [Fact]
+    public async Task WatcherSurvivesACorruptImageAddedToTheFolder()
+    {
+        using var folder = new TemporaryFolder();
+        using var catalog = new PhotoCatalog(new ImagePhotoProbe());
+        var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        catalog.StartWatching(folder.Path, () => refreshed.TrySetResult());
+
+        File.WriteAllText(System.IO.Path.Combine(folder.Path, "corrupt.jpg"), "not an image");
+
+        await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(catalog.Current);
+    }
+
     private sealed class FakeProbe : IPhotoProbe
     {
         public bool TryRead(string path, out PhotoInfo photo)
         {
             photo = new PhotoInfo(path, 100, 50);
-            return !path.Contains("bad", StringComparison.OrdinalIgnoreCase);
+            return !System.IO.Path.GetFileName(path).Contains("bad", StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -160,6 +198,16 @@ public sealed class PhotoCatalogTests
         public bool TryRead(string path, out PhotoInfo photo)
         {
             Calls++;
+            photo = new PhotoInfo(path, 100, 50);
+            return true;
+        }
+    }
+
+    private sealed class ThrowingProbe : IPhotoProbe
+    {
+        public bool TryRead(string path, out PhotoInfo photo)
+        {
+            if (System.IO.Path.GetFileName(path) == "corrupt.jpg") throw new ExternalException("Decoder failed.");
             photo = new PhotoInfo(path, 100, 50);
             return true;
         }

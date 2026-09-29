@@ -1,4 +1,5 @@
 using AspectSlide.Model;
+using System.Runtime.InteropServices;
 
 namespace AspectSlide.Catalog;
 
@@ -74,7 +75,7 @@ public sealed class PhotoCatalog : IPhotoCatalog
                             entries[child] = new CatalogEntry(info.Length, info.LastWriteTimeUtc.Ticks, photo);
                         }
                     }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or ExternalException)
                     { /* Skip this entry. */ }
                 }
             }
@@ -139,7 +140,7 @@ public sealed class PhotoCatalog : IPhotoCatalog
                 lock (sync) { path = root; callback = changed; }
                 if (path is null) return;
                 try { Scan(path); callback?.Invoke(); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or ExternalException) { }
             });
             debounce.Change(500, Timeout.Infinite);
         }

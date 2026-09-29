@@ -20,7 +20,7 @@ public sealed class TrayContext : ApplicationContext
     private SettingsForm? form;
     private bool disposed;
 
-    public TrayContext()
+    public TrayContext(bool background)
     {
         string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AspectSlide");
         store = new SettingsStore(Path.Combine(data, "settings.json"));
@@ -36,21 +36,27 @@ public sealed class TrayContext : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Settings", null, (_, _) => ShowSettings());
-        menu.Items.Add("Change now", null, async (_, _) =>
+        menu.Items.Add("Change now", null, async (_, _) => await RunTrayActionAsync(async () =>
         {
             if (!settings.OriginalCaptured && !settings.SolidColorAcknowledged &&
                 platform.GetAttachedDisplays().Any(d => string.IsNullOrEmpty(platform.GetWallpaper(d.Id))))
             { ShowSettings(); return; }
             await controller.ChangeNowAsync();
-        });
-        menu.Items.Add("Pause / resume", null, (_, _) => controller.SetPaused(!settings.Paused));
-        menu.Items.Add("Restore previous wallpapers", null, async (_, _) => await controller.RestorePreviousAsync());
+        }));
+        menu.Items.Add("Pause / resume", null, async (_, _) => await RunTrayActionAsync(() =>
+        {
+            controller.SetPaused(!settings.Paused);
+            return Task.CompletedTask;
+        }));
+        menu.Items.Add("Restore previous wallpapers", null, async (_, _) =>
+            await RunTrayActionAsync(controller.RestorePreviousAsync));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "AspectSlide", Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (_, _) => ShowSettings();
         window = new MessageWindow(() => _ = controller.OnDisplaysChangedAsync(), ShowSettings);
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        if (LaunchPresentation.NeedsSettingsWindow(settings, background)) ShowSettings();
         _ = BeginStartAsync();
     }
 
@@ -69,9 +75,20 @@ public sealed class TrayContext : ApplicationContext
     {
         if (form is { IsDisposed: false })
         {
-            if (form.InvokeRequired) form.BeginInvoke(() => form.RefreshStatus());
-            else form.RefreshStatus();
+            try
+            {
+                if (form.InvokeRequired) form.BeginInvoke(() => form.RefreshStatus());
+                else form.RefreshStatus();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+            { /* The settings window closed while this status notification was queued. */ }
         }
+    }
+
+    private async Task RunTrayActionAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (Exception ex) { MessageBox.Show(form, ex.Message, "AspectSlide", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
     private void ShowSettings()

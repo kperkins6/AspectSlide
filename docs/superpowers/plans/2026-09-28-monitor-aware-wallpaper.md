@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Target Windows 11 and one Windows virtual desktop.
-- Use one local folder and all ordinary subfolders; do not traverse directory links or junctions.
+- Use one local folder and all ordinary subfolders. Reject UNC paths, mapped network drives, and roots reached through directory links or junctions, including saved paths at startup. Skip linked entries and cloud-only placeholders.
 - Change all attached monitors on one timer, default 30 minutes, range 1 minute to 24 hours.
 - Use different files on monitors in the same batch whenever enough valid files exist.
 - Prefer matching orientation, then closer aspect ratio and sufficient resolution; use the closest available image when orientation has no match.
@@ -27,20 +27,23 @@
 
 ## Review Focus
 
-These five inputs deserve explicit tests in their owning tasks:
+These inputs deserve explicit tests in their owning tasks:
 
 1. Empty or one-image library: selection returns no change or reuses only when unavoidable, without throwing (Task 1).
 2. EXIF-rotated portrait JPEG: catalog reports displayed portrait dimensions (Task 2).
 3. A directory junction or symlink inside the selected tree: scanning never enters it (Task 2).
 4. A corrupt image beside valid images: catalog skips it and retains the valid entries (Task 2).
 5. Monitor disconnect while an interval fires: controller refreshes attached IDs and never writes to a detached monitor (Task 4).
+6. Timer, resume, and display-change event burst: only one automatic batch runs, and pausing or stopping cancels pending automatic work (Task 4).
+7. Restore after an original Stretch or Span background: preserve the full native position; report original solid-color state before first change (Tasks 3-5).
+8. UNC, mapped network drive, and junction in an ancestor of the chosen root: reject before scanning or watching, including a persisted folder (Task 2).
 
 ## File map
 
 - `.gitignore`: excludes build output and local test artifacts.
 - `src/AspectSlide/AspectSlide.csproj`, `Program.cs`: executable and single-instance startup.
 - `src/AspectSlide/Model/PhotoInfo.cs`, `DisplayInfo.cs`, `SelectionHistory.cs`, `SelectionEngine.cs`: pure wallpaper assignment logic.
-- `src/AspectSlide/Catalog/IPhotoProbe.cs`, `WicPhotoProbe.cs`, `PhotoCatalog.cs`, `CatalogCache.cs`, `WallpaperImageCache.cs`: safe recursive indexing, metadata cache, and selected-image normalization.
+- `src/AspectSlide/Catalog/LocalFolderValidator.cs`, `IPhotoProbe.cs`, `WicPhotoProbe.cs`, `PhotoCatalog.cs`, `CatalogCache.cs`, `WallpaperImageCache.cs`: local-root validation, safe recursive indexing, metadata cache, and selected-image normalization.
 - `src/AspectSlide/Windows/IWallpaperPlatform.cs`, `DesktopWallpaperPlatform.cs`, `WallpaperInterop.cs`: Windows monitor and wallpaper boundary.
 - `src/AspectSlide/Slideshow/AppSettings.cs`, `SettingsStore.cs`, `IClock.cs`, `IAppTimer.cs`, `SlideshowController.cs`: settings, timer decisions, and recovery.
 - `src/AspectSlide/UI/TrayContext.cs`, `SettingsForm.cs`, `StartupShortcut.cs`: user controls and per-user startup.
@@ -60,7 +63,8 @@ These five inputs deserve explicit tests in their owning tasks:
 
 **Interfaces:**
 - Produces: public `PhotoInfo(string Path, int Width, int Height, int ExifOrientation = 1)` and `DisplayInfo(string Id, int Width, int Height)` records.
-- Produces: `SelectionEngine.Choose(IReadOnlyList<DisplayInfo>, IReadOnlyList<PhotoInfo>, SelectionHistory, Random) : IReadOnlyDictionary<string, PhotoInfo>`.
+- Produces: `SelectionEngine.Choose(IReadOnlyList<DisplayInfo>, IReadOnlyList<PhotoInfo>, WallpaperFit, SelectionHistory, Random) : IReadOnlyDictionary<string, PhotoInfo>`.
+- Produces: `enum WallpaperFit { Fill, Fit }` for the app's setting.
 - Produces: `SelectionHistory.Record(string displayId, string photoPath)` and `SelectionHistory.WasRecentlyShown(string displayId, string photoPath)`.
 
 - [ ] **Step 1: Create the .NET 10 solution and a failing selector test.**
@@ -87,12 +91,12 @@ Write tests equivalent to:
 ```csharp
 var displays = new[] { new DisplayInfo("wide", 3440, 1440), new DisplayInfo("tall", 1080, 1920) };
 var photos = new[] { new PhotoInfo("wide.jpg", 3440, 1440), new PhotoInfo("tall.jpg", 1080, 1920) };
-var result = SelectionEngine.Choose(displays, photos, new SelectionHistory(), new Random(1));
+var result = SelectionEngine.Choose(displays, photos, WallpaperFit.Fill, new SelectionHistory(), new Random(1));
 Assert.Equal("wide.jpg", result["wide"].Path);
 Assert.Equal("tall.jpg", result["tall"].Path);
 ```
 
-Add cases for two same-orientation displays, ultrawide preference across seeded runs, no orientation match, an empty library, and one photo for two displays.
+Add cases for two same-orientation displays, ultrawide preference across seeded runs, no orientation match, an empty library, and one photo for two displays. Add a case where Fill and Fit select different best-resolution candidates.
 
 - [ ] **Step 2: Run the selector tests and confirm they fail for missing types.**
 
@@ -105,12 +109,14 @@ Expected: compile failure naming `PhotoInfo`, `DisplayInfo`, or `SelectionEngine
 Use positive dimensions only. For each display, first consider unused photos of matching orientation; if none remain, consider all unused photos; reuse only when there are no unused photos. Prefer less recently shown images. Among equally eligible photos, use seeded randomness and score:
 
 ```csharp
-static double Cost(DisplayInfo display, PhotoInfo photo)
+static double Cost(DisplayInfo display, PhotoInfo photo, WallpaperFit fit)
 {
     double displayRatio = (double)display.Width / display.Height;
     double photoRatio = (double)photo.Width / photo.Height;
     double ratioCost = Math.Abs(Math.Log(photoRatio / displayRatio));
-    double scale = Math.Max((double)display.Width / photo.Width, (double)display.Height / photo.Height);
+    double widthScale = (double)display.Width / photo.Width;
+    double heightScale = (double)display.Height / photo.Height;
+    double scale = fit == WallpaperFit.Fill ? Math.Max(widthScale, heightScale) : Math.Min(widthScale, heightScale);
     return ratioCost + (scale > 1 ? Math.Log(scale) * 0.25 : 0);
 }
 ```
@@ -137,7 +143,7 @@ git commit -m "feat: choose distinct aspect-matched wallpapers"
 ### Task 2: Safe recursive photo catalog
 
 **Files:**
-- Create: `src/AspectSlide/Catalog/IPhotoProbe.cs`, `WicPhotoProbe.cs`, `PhotoCatalog.cs`, `CatalogCache.cs`, `WallpaperImageCache.cs`
+- Create: `src/AspectSlide/Catalog/LocalFolderValidator.cs`, `IPhotoProbe.cs`, `WicPhotoProbe.cs`, `PhotoCatalog.cs`, `CatalogCache.cs`, `WallpaperImageCache.cs`
 - Create: `tests/AspectSlide.Tests/PhotoCatalogTests.cs`
 
 **Interfaces:**
@@ -145,12 +151,13 @@ git commit -m "feat: choose distinct aspect-matched wallpapers"
 - Produces: `IPhotoProbe.TryRead(string path, out PhotoInfo photo) : bool`.
 - Produces: `PhotoCatalog.Scan(string root) : IReadOnlyList<PhotoInfo>`, `PhotoCatalog.Current : IReadOnlyList<PhotoInfo>`, and `PhotoCatalog.StartWatching(string root, Action changed)`.
 - Produces: `PhotoCatalog.ShouldTraverse(FileAttributes attributes) : bool`, returning false for `ReparsePoint`.
+- Produces: `LocalFolderValidator.Validate(string root) : string`, returning a normalized local path or throwing a user-facing validation error before any scan or watcher starts.
 - Produces: `CatalogCache.Load(string root) : IReadOnlyList<PhotoInfo>` and `CatalogCache.Save(string root, IReadOnlyList<PhotoInfo>) : void` under `%LOCALAPPDATA%/AspectSlide`.
 - Produces: `WallpaperImageCache.Prepare(PhotoInfo photo) : string`, returning the original path for directly supported, unrotated JPEG/PNG/BMP images and a cached normalized JPEG path otherwise; `Prune(IReadOnlySet<string> activeWallpaperPaths) : void` removes only inactive app-owned cache files when the cache exceeds 256 MB.
 
 - [ ] **Step 1: Write catalog tests using a temporary folder.**
 
-Use a fake `IPhotoProbe` so enumeration is tested without image codecs. Create `root/a.jpg`, `root/nested/b.jpg`, `root/nested/bad.jpg`. Assert the first two are returned and the fake rejects the corrupt file. Assert `ShouldTraverse(FileAttributes.Directory | FileAttributes.ReparsePoint)` is false. Add a directory-symlink integration test when the host permits link creation. Create a 300x200 JPEG test fixture with EXIF orientation 6 (rotate 90 degrees) and assert WIC reports effective dimensions 200x300. Test cache reuse for unchanged size and modification time. Assert `WallpaperImageCache.Prepare` writes a corrected JPEG under app data for the rotated fixture, reuses it on a second call, and leaves the source hash unchanged. Give `Prune` a tiny test limit and assert it deletes only inactive cache files, never the active cached wallpaper or any source file. Test that creating and removing a nested image refreshes `Current` after one debounced watcher notification.
+Use a fake `IPhotoProbe` so enumeration is tested without image codecs. Create `root/a.jpg`, `root/nested/b.jpg`, `root/nested/bad.jpg`. Assert the first two are returned and the fake rejects the corrupt file. Assert `ShouldTraverse(FileAttributes.Directory | FileAttributes.ReparsePoint)` is false. Test `LocalFolderValidator` with a UNC path, mapped network drive when available, and a junction or symlink in the root's ancestry. Run the same validation for a persisted folder before startup scanning. Add a directory-symlink integration test when the host permits link creation. Assert file links and offline cloud placeholders are skipped. Create a 300x200 JPEG test fixture with EXIF orientation 6 (rotate 90 degrees) and assert WIC reports effective dimensions 200x300. Test cache reuse for unchanged size and modification time. Assert `WallpaperImageCache.Prepare` writes a corrected JPEG under app data for the rotated fixture, reuses it on a second call, and leaves the source hash unchanged. Give `Prune` a tiny test limit and assert it deletes only inactive cache files, never the active cached wallpaper or any source file. Test that creating and removing a nested image refreshes `Current` after one debounced watcher notification, and that the watcher is recreated after an unavailable root returns.
 
 ```csharp
 Assert.Equal(new[] { "a.jpg", "b.jpg" },
@@ -165,7 +172,7 @@ Expected: compile failure for the missing catalog and probe types.
 
 - [ ] **Step 3: Implement safe traversal and metadata probing.**
 
-Use `Directory.EnumerateDirectories` with a stack, skip directory and file entries carrying `FileAttributes.ReparsePoint`, catch access and decode exceptions per entry, and skip a missing root without deleting existing catalog state. WIC opens the first frame, calls `GetSize`, reads JPEG EXIF orientation from `/app1/ifd/{ushort=274}` (TIFF uses `/ifd/{ushort=274}`), and swaps width/height for orientations 5 through 8. Consult the [WIC frame decoder](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-imp-iwicbitmapframedecode) and [orientation metadata](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-native-image-format-metadata-queries) references for COM signatures and paths. Cache metadata by normalized path, file length, and last-write time; write cache updates atomically to a temporary file in the same app-data directory followed by replacement. `StartWatching` uses `FileSystemWatcher.IncludeSubdirectories = true`; debounce bursts for 500 ms before refreshing, and leave the last catalog snapshot intact if the root vanishes. `WallpaperImageCache` applies EXIF rotation and JPEG conversion only for a selected image requiring it, then atomically publishes the cached JPEG. Prune only app-owned, non-current cached JPEGs when that cache exceeds 256 MB. Never open source files for writing.
+Validate the root before scan and watch: normalize to a full path, reject UNC paths and `DriveType.Network`, and inspect every existing ancestor for `FileAttributes.ReparsePoint`. Apply this to newly chosen and persisted roots. Use `Directory.EnumerateDirectories` with a stack, skip directory and file entries carrying `FileAttributes.ReparsePoint`, skip offline cloud placeholders, catch access and decode exceptions per entry, and skip a missing root without deleting existing catalog state. WIC opens the first frame, calls `GetSize`, reads JPEG EXIF orientation from `/app1/ifd/{ushort=274}` (TIFF uses `/ifd/{ushort=274}`), and swaps width/height for orientations 5 through 8. Consult the [WIC frame decoder](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-imp-iwicbitmapframedecode) and [orientation metadata](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-native-image-format-metadata-queries) references for COM signatures and paths. Cache metadata by normalized path, file length, and last-write time; write cache updates atomically to a temporary file in the same app-data directory followed by replacement. `StartWatching` uses `FileSystemWatcher.IncludeSubdirectories = true`; debounce bursts for 500 ms before refreshing, leave the last catalog snapshot intact if the root vanishes, and retry watcher creation when it returns. `WallpaperImageCache` applies EXIF rotation and JPEG conversion only for a selected image requiring it, then atomically publishes the cached JPEG. Prune only app-owned, non-current cached JPEGs when that cache exceeds 256 MB. Never open source files for writing.
 
 ```csharp
 if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0) continue;
@@ -197,12 +204,12 @@ git commit -m "feat: index photos safely without touching originals"
 
 **Interfaces:**
 - Consumes: `DisplayInfo` from Task 1.
-- Produces: `IWallpaperPlatform.GetAttachedDisplays() : IReadOnlyList<DisplayInfo>`, `GetWallpaper(string displayId) : string?`, `GetPosition() : WallpaperFit`, `GetNativeSlideshowActive() : bool`, `SetWallpaper(string displayId, string path) : void`, and `SetPosition(WallpaperFit fit) : void`.
-- Produces: `enum WallpaperFit { Fill, Fit }`.
+- Produces: `IWallpaperPlatform.GetAttachedDisplays() : IReadOnlyList<DisplayInfo>`, `GetWallpaper(string displayId) : string?`, `GetPosition() : DesktopWallpaperPosition`, `GetNativeSlideshowActive() : bool`, `SetWallpaper(string displayId, string path) : void`, and `SetPosition(DesktopWallpaperPosition position) : void`.
+- Produces: `enum DesktopWallpaperPosition { Center, Tile, Stretch, Fit, Fill, Span }`, mapping every native `DESKTOP_WALLPAPER_POSITION` value without loss. The user-facing `WallpaperFit` from Task 1 remains Fill/Fit only.
 
 - [ ] **Step 1: Write contract tests for a fake platform.**
 
-Inject a fake low-level COM facade into `DesktopWallpaperPlatform`. It must expose two attached IDs and one detached ID, then assert the adapter returns only the two attached IDs, rejects a detached write, and passes distinct paths to distinct monitor IDs.
+Inject a fake low-level COM facade into `DesktopWallpaperPlatform`. It must expose two attached IDs and one detached ID, then assert the adapter returns only the two attached IDs, rejects a detached write, and passes distinct paths to distinct monitor IDs. Round-trip all six native wallpaper positions through the facade, especially Stretch and Span; accept an empty `GetWallpaper` result as a solid-color background. Test the `GetStatus` bit-mask predicate when slideshow is configured but currently suspended.
 
 ```csharp
 Assert.Equal(2, platform.GetAttachedDisplays().Count);
@@ -217,7 +224,7 @@ Expected: compile failure for `IWallpaperPlatform` and `WallpaperFit`.
 
 - [ ] **Step 3: Implement the COM adapter.**
 
-Declare the full `IDesktopWallpaper` interface in Windows SDK vtable order in `WallpaperInterop.cs`; preserve HRESULTs where `S_FALSE` distinguishes detached monitors. Wrap it in an injectable low-level facade for tests. Create the real COM object once on the app's STA thread. `GetMonitorDevicePathCount` plus `GetMonitorDevicePathAt` enumerate IDs; `GetMonitorRECT` supplies width/height and filters detached displays. Call `SetWallpaper(id, fullPath)` for one monitor and `SetPosition(DWPOS_FILL or DWPOS_FIT)` for the global fit setting. `GetStatus` detects native slideshow. Use the [Microsoft API interface reference](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-idesktopwallpaper) and release COM memory returned by the API correctly.
+Declare the full `IDesktopWallpaper` interface in Windows SDK vtable order in `WallpaperInterop.cs`; preserve HRESULTs where `S_FALSE` distinguishes detached monitors. Wrap it in an injectable low-level facade for tests. Create the real COM object once on the app's STA thread. `GetMonitorDevicePathCount` plus `GetMonitorDevicePathAt` enumerate IDs; `GetMonitorRECT` supplies width/height and filters detached displays. Call `SetWallpaper(id, fullPath)` for one monitor. Map the app's Fill/Fit setting to `DWPOS_FILL`/`DWPOS_FIT` when applying, while `GetPosition`/`SetPosition` can restore all six native values. Treat an empty wallpaper path from `GetWallpaper` as solid color and preserve it in the snapshot for a clear restoration warning. Use the `DSS_SLIDESHOW` bit from `GetStatus` to detect a configured native slideshow even if `DSS_DISABLED_BY_REMOTE_SESSION` is also present. Use the [Microsoft API interface reference](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-idesktopwallpaper), [position enum](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/ne-shobjidl_core-desktop_wallpaper_position), and [status flags](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-idesktopwallpaper-getstatus) and release COM memory returned by the API correctly.
 
 ```csharp
 int width = rect.Right - rect.Left;
@@ -229,7 +236,7 @@ if (hr == 0 && width > 0 && height > 0) displays.Add(new DisplayInfo(id, width, 
 
 Run: `dotnet test tests/AspectSlide.Tests/AspectSlide.Tests.csproj`
 
-During implementation on a Windows 11 desktop, record existing wallpaper paths and fit, set generated test images on two monitors, read them back, and restore the recorded state. Confirm that Fill/Fit applies globally and native slideshow status is read correctly.
+During implementation on a Windows 11 desktop, record existing wallpaper paths and the full native position, set generated test images on two monitors, read them back, and restore the recorded state. If any original path is empty or missing, report it and avoid this smoke test until a safely restorable state is available. Confirm that Fill/Fit applies globally and native slideshow status is read correctly.
 
 - [ ] **Step 5: Commit the boundary.**
 
@@ -249,14 +256,14 @@ git commit -m "feat: set wallpaper per monitor through Windows COM"
 **Interfaces:**
 - Consumes: catalog, image cache, selector, and wallpaper platform from Tasks 1-3.
 - Produces: `SlideshowController.ChangeNowAsync() : Task`, `SetPaused(bool) : void`, `OnDisplaysChangedAsync() : Task`, `RestorePreviousAsync() : Task`, `StartAsync() : Task`, and `Stop() : void`.
-- Produces: `SettingsStore.Load() : AppSettings` and `Save(AppSettings settings)`; includes previous wallpaper paths and fit for explicit restoration.
+- Produces: `SettingsStore.Load() : AppSettings` and `Save(AppSettings settings)`; includes previous wallpaper paths and full native position for explicit restoration.
 - Produces: `IClock.UtcNow : DateTimeOffset` and `IAppTimer.Arm(TimeSpan delay, Action tick) : void`, both injected into the controller for deterministic tests.
 
-`AppSettings` holds `Folder`, `Interval`, `Fit`, `StartAtSignIn`, `Paused`, `PreviousWallpapers` keyed by monitor ID, `PreviousFit`, and `SelectionHistory`. Defaults are null folder, 30-minute interval, Fill, startup off, and pause off.
+`AppSettings` holds `Folder`, `Interval`, user-facing `Fit`, `StartAtSignIn`, `Paused`, `PreviousWallpapers` keyed by monitor ID (allowing an empty path), `PreviousPosition` as `DesktopWallpaperPosition`, and `SelectionHistory`. Defaults are null folder, 30-minute interval, Fill, startup off, and pause off.
 
 - [ ] **Step 1: Write controller and persistence tests.**
 
-Use fake `IClock`, `IAppTimer`, and platform implementations. Cover one shared tick, manual Change now while paused, a missed interval after sleep causing one catch-up update, unavailable folder retaining current wallpaper, API failure retaining the failed monitor's prior wallpaper, a disconnected monitor removed before assignment, and native slideshow blocking activation. Test malformed settings JSON falls back to safe defaults and preserves the corrupt file for diagnosis.
+Use fake `IClock`, `IAppTimer`, and platform implementations. Cover one shared tick, manual Change now while paused, a missed interval after sleep causing one catch-up update, unavailable folder retaining current wallpaper, API failure retaining the failed monitor's prior wallpaper, a disconnected monitor removed before assignment, and native slideshow blocking activation. Add a deterministic timer/resume/display-change burst while image preparation is held open: expect at most one pending automatic batch and no second change immediately after the first. Pause or Stop during the held preparation and assert pending automatic work is discarded. Assert no `SetWallpaper` call occurs until every selected image is prepared; if preparation of one image fails, exclude that file and reselect with a retry bound no larger than the catalog size. Simulate monitor hotplug during preparation and assert the stale batch is discarded and replanned from current IDs. Test full native position persistence and that an empty original wallpaper path is reported and skipped on restore. Test malformed settings JSON falls back to safe defaults and preserves the corrupt file for diagnosis.
 
 ```csharp
 await controller.ChangeNowAsync();
@@ -272,7 +279,7 @@ Expected: compile failure for `SlideshowController` and `SettingsStore`.
 
 - [ ] **Step 3: Implement one serialized change path.**
 
-Use `SemaphoreSlim(1,1)` so timer, manual command, and display-change events never overlap. One `System.Threading.Timer` is armed for the next due time, with no fixed-rate polling. Post every wallpaper operation to the captured WinForms STA synchronization context. On each change, refresh attached displays, obtain a catalog snapshot, choose a batch, prepare each selected path with `WallpaperImageCache.Prepare`, set each display, and record history only after that display's COM call succeeds. Pass the current wallpaper paths to `WallpaperImageCache.Prune` after successful assignments. Save settings atomically. Enforce interval bounds when loading and editing settings. On wake, compare one stored next-due time and run no more than one change. On display change, debounce and run one fresh batch. Subscribe to catalog change notifications, and schedule one reconciliation scan per day to repair missed events. When native slideshow is active, report a blocked state without changing wallpapers.
+Use `SemaphoreSlim(1,1)` so timer, manual command, and display-change events never overlap. Coalesce automatic requests while a change is in flight into at most one pending request; store a generation token and invalidate pending automatic work on Pause or Stop. After taking the gate, recheck generation, paused/stopped state, and due time before any automatic batch. One `System.Threading.Timer` is armed for the next due time, with no fixed-rate polling. Run source decoding and `WallpaperImageCache.Prepare` off the UI thread. On each change, obtain a catalog snapshot, choose a batch, and prepare all selected paths before setting any wallpaper. Exclude a failed selected image for the session and reselect from remaining candidates with no more attempts than the catalog count. After preparation, recheck the generation and pause/stop state before any automatic wallpaper call. Marshal only wallpaper COM calls to the captured WinForms STA synchronization context. Refresh the attached monitor IDs after preparation; if topology changed, discard the batch and replan after the display-change debounce. Otherwise apply per-monitor `SetWallpaper` calls consecutively on STA, and record history only after each call succeeds. The transition is best effort because the API has one call per monitor. Pass the current wallpaper paths to `WallpaperImageCache.Prune` after successful assignments. Save settings atomically. Enforce interval bounds when loading and editing settings. On wake, compare one stored next-due time and run no more than one change. On display change, debounce and run one fresh batch. Subscribe to catalog change notifications, and schedule one reconciliation scan per day to repair missed events and retry a watcher whose root has returned. When native slideshow is active, report a blocked state without changing wallpapers.
 
 ```csharp
 await gate.WaitAsync();
@@ -280,7 +287,7 @@ try { await ChangeCoreAsync(forceEvenIfPaused: true); }
 finally { gate.Release(); }
 ```
 
-Before the first controlled change, save the original per-monitor wallpaper paths and global fit. `RestorePreviousAsync` restores accessible paths only after an explicit UI action; `Stop` does not restore them.
+Before the first controlled change, save the original per-monitor wallpaper paths and full native position. Surface a warning before activation if an original path is empty (solid color cannot be restored automatically). `RestorePreviousAsync` restores accessible paths and the recorded native position only after an explicit UI action; it skips empty or missing paths and reports each skipped monitor. `Stop` does not restore them.
 
 - [ ] **Step 4: Run focused and full tests.**
 
@@ -331,7 +338,7 @@ Expected: compile failure for `StartupShortcut`.
 
 - [ ] **Step 3: Build the UI and startup link.**
 
-Use one `ApplicationContext` containing `NotifyIcon`; create `SettingsForm` only when requested and hide or dispose it without ending the process. Remove the template's `Form1` files. Use an OS folder picker, `NumericUpDown` interval control, Fill/Fit radio or combo, thumbnail-sized monitor previews loaded only while the window is open, status text, and the commands listed above. Open `ms-settings:colors` with shell execution. Create a `.lnk` using the documented Shell Link COM interface in the injected Startup directory. `Program.Main` is `[STAThread]`, uses a named mutex to keep one instance, and sends a registered window message to show the existing settings window when a second launch occurs. A hidden WinForms message window handles `WM_DISPLAYCHANGE`; `Microsoft.Win32.SystemEvents.PowerModeChanged` handles resume. Both forward to the controller and are unsubscribed on Exit.
+Use one `ApplicationContext` containing `NotifyIcon`; create `SettingsForm` only when requested and hide or dispose it without ending the process. Remove the template's `Form1` files. Use an OS folder picker, validate its result with `LocalFolderValidator` before saving or scanning, a `NumericUpDown` interval control, Fill/Fit radio or combo, thumbnail-sized monitor previews loaded only while the window is open, status text, and the commands listed above. Show a clear nonlocal-folder error, a warning before first activation when a saved solid-color desktop cannot be automatically restored, and recovery status if a source folder or watcher is unavailable. A native slideshow conflict message links to Windows Background settings and offers Check again. Open `ms-settings:colors` with shell execution. Create a `.lnk` using the documented Shell Link COM interface in the injected Startup directory. `Program.Main` is `[STAThread]`, uses a named mutex to keep one instance, and sends a registered window message to show the existing settings window when a second launch occurs. A hidden WinForms message window handles `WM_DISPLAYCHANGE`; `Microsoft.Win32.SystemEvents.PowerModeChanged` handles resume. Both forward to the controller and are unsubscribed on Exit.
 
 ```csharp
 Process.Start(new ProcessStartInfo("ms-settings:colors") { UseShellExecute = true });
@@ -344,7 +351,7 @@ Run: `dotnet test tests/AspectSlide.Tests/AspectSlide.Tests.csproj`
 
 Run: `dotnet build src/AspectSlide/AspectSlide.csproj -c Release`
 
-Manually check high-DPI scaling, keyboard access, the missing-folder and native-slideshow messages, and that closing settings leaves only the tray app running. Confirm the Startup toggle makes and removes only the app's shortcut.
+Manually check high-DPI scaling, keyboard access, the missing-folder, nonlocal-folder, solid-color restore limitation, and native-slideshow messages, and that closing settings leaves only the tray app running. Confirm the Startup toggle makes and removes only the app's shortcut.
 
 - [ ] **Step 5: Commit the UI.**
 
@@ -367,7 +374,7 @@ git commit -m "feat: add minimal wallpaper tray controls"
 
 - [ ] **Step 1: Write the usage and safety guide.**
 
-Document the supported Windows version, .NET 10 Desktop Runtime prerequisite, folder/subfolder behavior, native slideshow conflict and Check again step, Fill/Fit, Startup toggle, pause/exit, Restore previous wallpapers, and the Windows Automatic accent-color link. Include the primary-monitor accent limitation.
+Document the supported Windows version, .NET 10 Desktop Runtime prerequisite, local-folder/subfolder restrictions, native slideshow conflict and Check again step, Fill/Fit, Startup toggle, pause/exit, Restore previous wallpapers, and the Windows Automatic accent-color link. Explain that the original solid-color desktop needs manual restoration, that per-monitor changes are sequential and best effort, and that the primary monitor is not a guaranteed accent-color source.
 
 - [ ] **Step 2: Run automated verification.**
 
@@ -383,7 +390,7 @@ Expected: all tests pass, publish exits 0, and diff check reports no whitespace 
 
 - [ ] **Step 3: Run the real Windows 11 acceptance matrix.**
 
-With a temporary test folder and the real monitors, verify every acceptance check in the spec, including mixed orientation, same orientation, ultrawide, insufficient images, corrupt image, sleep/wake, hotplug, native slideshow conflict, pause, sign-in startup, and explicit restore. Record original wallpaper paths and fit before testing, then restore them. Compare hashes of every test source photo before and after. Let the process idle for 10 minutes and confirm no recurring full scans and near-zero idle CPU in Task Manager.
+With a temporary test folder and the real monitors, verify every acceptance check in the spec, including mixed orientation, same orientation, ultrawide, insufficient images, corrupt image, sleep/wake, hotplug, burst coalescing, native slideshow conflict, pause, sign-in startup, and explicit restore. Test Fill and Fit selection, invalid network or linked roots, selected-image decode failure and fallback, and original Center, Tile, Stretch, Span, Fill, Fit, or solid-color state where practical. Record original wallpaper paths and full native position before testing, then restore them. If an original path is empty or inaccessible, do not alter that monitor for the smoke test; report that the desktop cannot be automatically restored. Compare hashes of every test source photo before and after. Let the process idle for 10 minutes and confirm no recurring full scans and near-zero idle CPU in Task Manager.
 
 - [ ] **Step 4: Correct only failures found in Step 2 or 3, then rerun the affected check and full suite.**
 

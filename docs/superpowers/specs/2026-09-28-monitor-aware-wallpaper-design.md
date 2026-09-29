@@ -11,8 +11,8 @@ The design follows four first principles: minimal features, low idle resource us
 ## Product behavior
 
 - Target Windows 11 and one Windows virtual desktop. Any number of connected monitors may be used.
-- The user selects one local folder. The app includes images in all ordinary subfolders. Directory links and junctions are not traversed, preventing cycles and unintended access outside the chosen tree.
-- A single configurable timer changes all connected monitors together. The default interval is 30 minutes; the user may set any interval from 1 minute to 24 hours. Change now works even while paused and does not resume the timer.
+- The user selects one local folder. UNC paths, mapped network drives, and roots reached through directory links or junctions are rejected before scanning; saved paths receive the same check at startup. The app includes images in all ordinary subfolders. Directory links, junctions, and file links are not traversed. Files that are only cloud placeholders are skipped until locally available.
+- A single configurable timer changes all connected monitors together. The default interval is 30 minutes; the user may set any interval from 1 minute to 24 hours. Images are prepared before any monitor changes, then applied in one coordinated batch. Windows exposes one call per monitor, so the visible transition is best effort rather than atomic. Change now works even while paused and does not resume the timer.
 - All monitors display different files in a change batch whenever the catalog contains at least that many valid files. Reuse is allowed only when there are too few unique files.
 - The app prefers an image with the same orientation as the monitor. Within that group, it favors the closest aspect ratio and avoids needless upscaling. When no same-orientation image is available, it uses the closest available image.
 - The default display mode is Fill. The user may choose Fit instead. This is one setting shared by all monitors because the documented Windows wallpaper position API is system-wide.
@@ -39,8 +39,8 @@ The process has five focused parts:
 
 - **Catalog:** recursively indexes image paths and reads displayed dimensions, including EXIF rotation, through Windows Imaging Component codecs installed on the machine. It caches path, size, modification time, and dimensions in local app data. It never writes to source images. If a selected source format cannot be used directly as wallpaper, the app creates a normalized JPEG in its own cache for that image only.
 - **Monitor adapter:** obtains connected monitor IDs and rectangles using `IDesktopWallpaper`, then sets one wallpaper path per monitor.
-- **Selector:** forms one batch of distinct images, preferring orientation, aspect ratio, resolution, and images not recently displayed. It tracks shuffle history so immediate repeats are avoided when alternatives exist.
-- **Scheduler:** owns one timer and handles Change now, pause, sign-in startup, wake from sleep, and monitor changes. If a deadline passes during sleep, it performs at most one catch-up change.
+- **Selector:** forms one batch of distinct images, preferring orientation, aspect ratio, resolution for the chosen Fill/Fit mode, and images not recently displayed. It tracks shuffle history so immediate repeats are avoided when alternatives exist.
+- **Scheduler:** owns one timer and handles Change now, pause, sign-in startup, wake from sleep, and monitor changes. Automatic triggers arriving during an in-progress change are coalesced; pause or exit invalidates pending automatic work. If a deadline passes during sleep, it performs at most one catch-up change.
 - **Settings/state:** stores the chosen folder, interval, fit mode, startup preference, pause state, catalog metadata, and shuffle history under the current user's app data.
 
 The selector compares aspect ratios using the absolute log ratio between image and monitor. It adds a penalty when an image would need upscaling. Orientation mismatch is considered only when the matching-orientation pool is empty or distinct assignment otherwise cannot fill the connected monitors. Randomness is applied among suitable candidates, with recent images penalized, so the result remains a slideshow rather than a fixed list of best matches. Selection evaluates the whole monitor batch so the same file is not assigned twice when avoidable.
@@ -52,8 +52,8 @@ The selector compares aspect ratios using the absolute log ratio between image a
 - The app reads the photo tree but never edits, deletes, renames, or moves its files. Its own cache and settings remain in per-user app data.
 - No network access, telemetry, elevated privileges, Windows service, or unsupported accent-color registry changes are part of the design.
 - On first activation, the app checks whether the native Windows slideshow is active. If it is, the settings window explains the conflict and links to Windows Background settings. The user can select Check again after changing Windows to Picture. The app waits until native slideshow is off before controlling wallpaper, avoiding two schedulers competing.
-- If the folder disappears, an image fails to decode, or a wallpaper API call fails, the app keeps the last successful wallpaper, records a concise error, and retries on the next relevant event. One bad file does not stop the slideshow.
-- Before its first controlled change, the app saves the current wallpaper path for each attached monitor and the wallpaper position. Restore previous wallpapers reapplies that saved state only when the user selects the action and the saved files are still accessible. If any file is missing, it reports that fact without replacing the current wallpaper on that monitor. Exit never restores automatically, which could overwrite a later user choice.
+- If the folder disappears, an image fails to decode, or a wallpaper API call fails, the app keeps the last successful wallpaper and records a concise error. A selected image that fails preparation is excluded for the current session and replaced from another candidate, with a bounded retry count. The watcher is recreated when an unavailable root returns.
+- Before its first controlled change, the app saves the current wallpaper path for each attached monitor and the full native Windows wallpaper position. Restore previous wallpapers reapplies that saved state only when the user selects the action and the saved files are still accessible. A saved empty path or missing file is reported without replacing that monitor's current wallpaper. An original solid-color desktop therefore cannot be restored automatically, and the app says so before first activation. Exit never restores automatically, which could overwrite a later user choice.
 
 ## Acceptance checks
 
@@ -67,6 +67,8 @@ The selector compares aspect ratios using the absolute log ratio between image a
 8. The app starts at sign-in only if enabled and can be paused or exited from the tray. After Exit, current wallpapers remain visible.
 9. The app can open Windows accent-color settings; with Automatic selected there, Windows owns the accent-color choice. A specific source monitor is not guaranteed.
 10. The app never changes the contents of the chosen photo folder, never contacts a network endpoint, and never needs administrator privileges.
+11. A burst of timer, resume, and display-change events produces no rapid sequence of wallpaper changes; automatic triggers are coalesced.
+12. Restore previous wallpapers preserves Center, Tile, Stretch, Span, Fill, or Fit when an image path was saved, and clearly identifies an original solid-color background that requires manual restoration.
 
 ## Windows API references
 

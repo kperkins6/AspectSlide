@@ -1,6 +1,6 @@
 # Monitor-aware wallpaper slideshow for Windows 11
 
-Status: In-chat design approved; written spec awaiting review.
+Status: Approved by the user on 2026-09-28.
 
 ## Purpose
 

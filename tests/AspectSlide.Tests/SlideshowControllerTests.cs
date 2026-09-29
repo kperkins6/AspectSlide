@@ -179,6 +179,134 @@ public sealed class SlideshowControllerTests
     }
 
     [Fact]
+    public async Task AllWallpaperWritesFailingSchedulesRecoverySoon()
+    {
+        using var fixture = new ControllerFixture();
+        fixture.Platform.FailAll = true;
+
+        await fixture.Controller.ChangeNowAsync();
+
+        Assert.Empty(fixture.Platform.Assignments);
+        Assert.InRange(fixture.Timer.LastDelay, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));
+    }
+
+    [Fact]
+    public async Task EmptyCatalogArmsARecoveryTimer()
+    {
+        using var fixture = new ControllerFixture();
+        foreach (string file in Directory.EnumerateFiles(fixture.Settings.Folder!)) File.Delete(file);
+
+        await fixture.Controller.ChangeNowAsync();
+
+        Assert.True(fixture.Timer.ArmCount > 0);
+        Assert.InRange(fixture.Timer.LastDelay, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));
+    }
+
+    [Fact]
+    public async Task ReturningFolderIsRescannedBeforeUsingTheOldSnapshot()
+    {
+        using var fixture = new ControllerFixture();
+        await fixture.Controller.ChangeNowAsync();
+        int scans = fixture.Catalog.ScanCalls;
+        string path = fixture.Settings.Folder!;
+        string away = path + "-away";
+        Directory.Move(path, away);
+        try
+        {
+            await fixture.Controller.ChangeNowAsync();
+            Directory.Move(away, path);
+            File.WriteAllText(Path.Combine(path, "new.jpg"), "new");
+
+            await fixture.Controller.ChangeNowAsync();
+
+            Assert.True(fixture.Catalog.ScanCalls > scans);
+            Assert.Equal(5, fixture.Controller.LibraryCount);
+        }
+        finally { if (Directory.Exists(away) && !Directory.Exists(path)) Directory.Move(away, path); }
+    }
+
+    [Fact]
+    public async Task FastBatchAbsorbsPendingDisplayEvent()
+    {
+        using var fixture = new ControllerFixture();
+        Task displayEvent = fixture.Controller.OnDisplaysChangedAsync();
+        await fixture.Controller.OnTimerAsync();
+        await displayEvent;
+
+        Assert.Equal(2, fixture.Platform.Assignments.Count);
+    }
+
+    [Fact]
+    public async Task ActualMonitorRotationTriggersANewBatch()
+    {
+        using var fixture = new ControllerFixture();
+        await fixture.Controller.ChangeNowAsync();
+        fixture.Platform.Displays = [new("wide", 1080, 1920), new("tall", 1080, 1920)];
+
+        await fixture.Controller.OnDisplaysChangedAsync();
+
+        Assert.Equal(4, fixture.Platform.Assignments.Count);
+    }
+
+    [Fact]
+    public async Task PauseAfterTopologyRefreshPreventsQueuedWallpaperWrite()
+    {
+        using var fixture = new ControllerFixture();
+        fixture.Platform.OnGetDisplays = count =>
+        {
+            if (count == 3) fixture.Controller.SetPaused(true);
+        };
+
+        await fixture.Controller.OnTimerAsync();
+
+        Assert.Empty(fixture.Platform.Assignments);
+    }
+
+    [Fact]
+    public async Task FailedImageIsNotRetriedOnLaterChangesInSameSession()
+    {
+        using var fixture = new ControllerFixture();
+        string? failedPath = null;
+        fixture.Preparer.OnPrepare = photo =>
+        {
+            failedPath ??= photo.Path;
+            if (photo.Path == failedPath) throw new IOException("decode failed");
+            return null;
+        };
+        await fixture.Controller.ChangeNowAsync();
+        int firstBatchAttempts = fixture.Preparer.AttemptPaths.Count;
+
+        await fixture.Controller.ChangeNowAsync();
+
+        Assert.DoesNotContain(failedPath, fixture.Preparer.AttemptPaths.Skip(firstBatchAttempts));
+    }
+
+    [Fact]
+    public async Task SwitchingFoldersDuringPreparationCancelsTheOldBatch()
+    {
+        using var fixture = new ControllerFixture();
+        using var nextFolder = new TemporaryFolder();
+        File.WriteAllText(Path.Combine(nextFolder.Path, "wide-new.jpg"), "new wide");
+        File.WriteAllText(Path.Combine(nextFolder.Path, "tall-new.jpg"), "new tall");
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            if (!entered.IsSet) { entered.Set(); release.Wait(TimeSpan.FromSeconds(5)); }
+            return null;
+        };
+
+        Task oldBatch = fixture.Controller.OnTimerAsync();
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+        Task switchFolder = fixture.Controller.SelectFolderAsync(nextFolder.Path);
+        release.Set();
+        await Task.WhenAll(oldBatch, switchFolder);
+
+        Assert.Equal(2, fixture.Platform.Assignments.Count);
+        Assert.All(fixture.Platform.Assignments, a => Assert.StartsWith(nextFolder.Path, a.Path));
+    }
+
+    [Fact]
     public async Task LaterChangesUseCatalogSnapshotInsteadOfReprobingWholeFolder()
     {
         using var fixture = new ControllerFixture();
@@ -188,6 +316,21 @@ public sealed class SlideshowControllerTests
         await fixture.Controller.ChangeNowAsync();
 
         Assert.Equal(firstScan, fixture.Catalog.ScanCalls);
+    }
+
+    [Fact]
+    public async Task SettingsCanShowLibraryCountAndOriginalSourceNames()
+    {
+        using var fixture = new ControllerFixture();
+        fixture.Preparer.OnPrepare = photo => photo.Path + ".prepared";
+
+        await fixture.Controller.ChangeNowAsync();
+
+        Assert.Equal(4, fixture.Controller.LibraryCount);
+        string prepared = fixture.Platform.Wallpapers["wide"];
+        string? source = fixture.Controller.GetCurrentSourcePath("wide", prepared);
+        Assert.Equal(fixture.Settings.RecentPhotos["wide"].Last(), source);
+        Assert.Null(fixture.Controller.GetCurrentSourcePath("wide", "a-different-wallpaper.jpg"));
     }
 
     private sealed class ControllerFixture : IDisposable
@@ -248,11 +391,13 @@ public sealed class SlideshowControllerTests
     private sealed class FakePreparer : IWallpaperImagePreparer
     {
         public int Calls { get; private set; }
+        public List<string> AttemptPaths { get; } = [];
         public IReadOnlySet<string> LastPrunePaths { get; private set; } = new HashSet<string>();
         public Func<PhotoInfo, string?>? OnPrepare { get; set; }
         public string Prepare(PhotoInfo photo)
         {
             Calls++;
+            AttemptPaths.Add(photo.Path);
             return OnPrepare?.Invoke(photo) ?? photo.Path;
         }
         public void Prune(IReadOnlySet<string> activeWallpaperPaths) => LastPrunePaths = activeWallpaperPaths;
@@ -264,14 +409,23 @@ public sealed class SlideshowControllerTests
         public List<(string Id, string Path)> Assignments { get; } = [];
         public DesktopWallpaperPosition Position { get; set; } = DesktopWallpaperPosition.Fill;
         public bool NativeSlideshow { get; set; }
+        public IReadOnlyList<DisplayInfo> Displays { get; set; } =
+            [new("wide", 1920, 1080), new("tall", 1080, 1920)];
         public string? FailOn { get; set; }
-        public IReadOnlyList<DisplayInfo> GetAttachedDisplays() => [new("wide", 1920, 1080), new("tall", 1080, 1920)];
+        public bool FailAll { get; set; }
+        public Action<int>? OnGetDisplays { get; set; }
+        private int getDisplaysCount;
+        public IReadOnlyList<DisplayInfo> GetAttachedDisplays()
+        {
+            OnGetDisplays?.Invoke(++getDisplaysCount);
+            return Displays;
+        }
         public string GetWallpaper(string displayId) => Wallpapers[displayId];
         public DesktopWallpaperPosition GetPosition() => Position;
         public bool GetNativeSlideshowActive() => NativeSlideshow;
         public void SetWallpaper(string displayId, string path)
         {
-            if (displayId == FailOn) throw new System.Runtime.InteropServices.COMException("write failed");
+            if (FailAll || displayId == FailOn) throw new System.Runtime.InteropServices.COMException("write failed");
             Wallpapers[displayId] = path;
             Assignments.Add((displayId, path));
         }
@@ -281,7 +435,8 @@ public sealed class SlideshowControllerTests
     public sealed class FakeTimer : IAppTimer
     {
         public TimeSpan LastDelay { get; private set; }
-        public void Arm(TimeSpan delay, Action tick) => LastDelay = delay;
+        public int ArmCount { get; private set; }
+        public void Arm(TimeSpan delay, Action tick) { LastDelay = delay; ArmCount++; }
         public void Dispose() { }
     }
 }

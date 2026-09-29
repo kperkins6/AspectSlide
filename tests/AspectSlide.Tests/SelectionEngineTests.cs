@@ -50,6 +50,18 @@ public sealed class SelectionEngineTests
     }
 
     [Fact]
+    public void GlobalAssignmentReservesUltrawidePhotoForUltrawideMonitor()
+    {
+        var displays = new[] { new DisplayInfo("ordinary", 1920, 1080), new DisplayInfo("ultrawide", 3440, 1440) };
+        var photos = new[] { new PhotoInfo("ultrawide.jpg", 3440, 1440), new PhotoInfo("compact.jpg", 2400, 2000) };
+
+        var chosen = SelectionEngine.Choose(displays, photos, WallpaperFit.Fill, new SelectionHistory(), new Random(1));
+
+        Assert.Equal("ultrawide.jpg", chosen["ultrawide"].Path);
+        Assert.Equal("compact.jpg", chosen["ordinary"].Path);
+    }
+
+    [Fact]
     public void FillAndFitAccountForDifferentRequiredScale()
     {
         var display = new[] { new DisplayInfo("wide", 2000, 1000) };
@@ -60,5 +72,45 @@ public sealed class SelectionEngineTests
 
         Assert.Equal("exact-small.jpg", fill["wide"].Path);
         Assert.Equal("slightly-tall.jpg", fit["wide"].Path);
+    }
+
+    [Fact]
+    public void TwoImageLibraryDoesNotRepeatTheCurrentImage()
+    {
+        var display = new[] { new DisplayInfo("wide", 1920, 1080) };
+        var photos = new[] { new PhotoInfo("exact.jpg", 1920, 1080), new PhotoInfo("close.jpg", 1920, 1200) };
+        var history = new SelectionHistory();
+        string? previous = null;
+        for (int i = 0; i < 25; i++)
+        {
+            string current = SelectionEngine.Choose(display, photos, WallpaperFit.Fill, history, new Random(i))["wide"].Path;
+            Assert.NotEqual(previous, current);
+            history.Record("wide", current);
+            previous = current;
+        }
+    }
+
+    [Fact]
+    public void ShuffleContinuesToVaryAfterAllSuitableImagesEnterHistory()
+    {
+        var display = new[] { new DisplayInfo("wide", 1920, 1080) };
+        var photos = new[]
+        {
+            new PhotoInfo("exact.jpg", 1920, 1080),
+            new PhotoInfo("near.jpg", 2000, 1100),
+            new PhotoInfo("other.jpg", 1920, 1000)
+        };
+        var history = new SelectionHistory();
+        foreach (var photo in photos) history.Record("wide", photo.Path);
+        var picks = new HashSet<string>();
+
+        for (int i = 0; i < 10; i++)
+        {
+            string path = SelectionEngine.Choose(display, photos, WallpaperFit.Fill, history, new Random(i))["wide"].Path;
+            picks.Add(path);
+            history.Record("wide", path);
+        }
+
+        Assert.Equal(3, picks.Count);
     }
 }

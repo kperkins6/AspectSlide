@@ -19,7 +19,8 @@ public sealed class SettingsForm : Form
     private readonly ComboBox fit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left, Width = 100 };
     private readonly CheckBox signIn = new() { Text = "Start at sign-in", AutoSize = true };
     private readonly Label status = new() { AutoSize = true, MaximumSize = new Size(510, 0) };
-    private readonly ListBox monitors = new() { Dock = DockStyle.Fill, Height = 105 };
+    private readonly Label libraryCount = new() { AutoSize = true };
+    private readonly FlowLayoutPanel monitors = new() { Dock = DockStyle.Fill, Height = 165, AutoScroll = true };
     private readonly Button pause = new() { AutoSize = true };
     private bool updatingSignIn;
 
@@ -33,8 +34,8 @@ public sealed class SettingsForm : Form
         this.platform = platform;
         this.exit = exit;
         Text = "AspectSlide settings";
-        MinimumSize = new Size(570, 470);
-        Size = new Size(660, 530);
+        MinimumSize = new Size(570, 530);
+        Size = new Size(660, 600);
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
 
@@ -44,13 +45,15 @@ public sealed class SettingsForm : Form
         for (int i = 0; i < 7; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         Controls.Add(layout);
 
-        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
+        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, AutoSize = true };
         folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         folderRow.Controls.Add(folderText, 0, 0);
         var browse = new Button { Text = "Browse…", AutoSize = true };
         browse.Click += async (_, _) => await ChooseFolderAsync();
         folderRow.Controls.Add(browse, 1, 0);
+        folderRow.Controls.Add(libraryCount, 0, 1);
+        folderRow.SetColumnSpan(libraryCount, 2);
         AddRow(layout, 0, "Photo folder", folderRow);
 
         AddRow(layout, 1, "Change every", minutes);
@@ -109,6 +112,12 @@ public sealed class SettingsForm : Form
         {
             if (args.CloseReason == CloseReason.UserClosing) { args.Cancel = true; Hide(); }
         };
+        VisibleChanged += (_, _) =>
+        {
+            if (Visible) RefreshStatus();
+            else DisposePreviews();
+        };
+        FormClosed += (_, _) => DisposePreviews();
         RefreshStatus();
     }
 
@@ -144,10 +153,8 @@ public sealed class SettingsForm : Form
                 if (proceed != DialogResult.OK) return;
                 controller.AcknowledgeSolidColorRestoreLimitation();
             }
-            settings.Folder = path;
+            await controller.SelectFolderAsync(path);
             folderText.Text = path;
-            store.Save(settings);
-            await controller.StartAsync();
             RefreshStatus();
         }
         catch (Exception ex) { ShowError(ex); }
@@ -158,16 +165,67 @@ public sealed class SettingsForm : Form
         if (IsDisposed) return;
         pause.Text = settings.Paused ? "Resume" : "Pause";
         status.Text = controller.Status;
-        monitors.Items.Clear();
+        libraryCount.Text = $"{controller.LibraryCount} usable photo(s), including subfolders";
+        DisposePreviews();
+        if (!Visible) return;
         try
         {
+            int number = 0;
             foreach (var display in platform.GetAttachedDisplays())
             {
+                number++;
                 string path = platform.GetWallpaper(display.Id);
-                monitors.Items.Add($"{display.Width} × {display.Height}  —  {(string.IsNullOrEmpty(path) ? "Solid color" : Path.GetFileName(path))}");
+                string? source = controller.GetCurrentSourcePath(display.Id, path);
+                var card = new TableLayoutPanel { Width = 185, Height = 145, RowCount = 2, Margin = new Padding(3, 3, 8, 3) };
+                card.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
+                card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                var preview = new PictureBox { Width = 155, Height = 82, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(40, 40, 40) };
+                preview.Image = CreateThumbnail(path);
+                card.Controls.Add(preview, 0, 0);
+                string orientation = display.Width > display.Height ? "Landscape" : display.Height > display.Width ? "Portrait" : "Square";
+                card.Controls.Add(new Label
+                {
+                    AutoSize = true,
+                    MaximumSize = new Size(180, 0),
+                    Text = $"Monitor {number} · {orientation} · {display.Width} × {display.Height}\n" +
+                           (string.IsNullOrEmpty(path) ? "Solid color" : Path.GetFileName(source ?? path))
+                }, 0, 1);
+                monitors.Controls.Add(card);
             }
         }
         catch (Exception ex) { status.Text = ex.Message; }
+    }
+
+    private static Image? CreateThumbnail(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        try
+        {
+            FileAttributes attributes = File.GetAttributes(path);
+            string? linkTarget = (attributes & FileAttributes.ReparsePoint) != 0 ? new FileInfo(path).LinkTarget : null;
+            if (!PhotoCatalog.ShouldTraverse(attributes, linkTarget)) return null;
+            using var original = Image.FromFile(path);
+            double scale = Math.Min(155.0 / original.Width, 82.0 / original.Height);
+            return new Bitmap(original, new Size(Math.Max(1, (int)(original.Width * scale)),
+                Math.Max(1, (int)(original.Height * scale))));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OutOfMemoryException)
+        { return null; }
+    }
+
+    private void DisposePreviews()
+    {
+        foreach (Control card in monitors.Controls.Cast<Control>().ToArray())
+        {
+            foreach (var preview in card.Controls.OfType<PictureBox>())
+            {
+                Image? image = preview.Image;
+                preview.Image = null;
+                image?.Dispose();
+            }
+            card.Dispose();
+        }
+        monitors.Controls.Clear();
     }
 
     private async Task ChangeNowWithWarningAsync()

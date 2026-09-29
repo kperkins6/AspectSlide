@@ -15,6 +15,7 @@ public sealed class PhotoCatalog : IPhotoCatalog
     private System.Threading.Timer? debounce;
     private string? root;
     private Action? changed;
+    private bool disposed;
     private IReadOnlyList<PhotoInfo> current = [];
 
     public PhotoCatalog(IPhotoProbe probe, CatalogCache? cache = null)
@@ -96,8 +97,11 @@ public sealed class PhotoCatalog : IPhotoCatalog
         string full = LocalFolderValidator.Validate(path);
         lock (sync)
         {
+            ObjectDisposedException.ThrowIf(disposed, this);
             watcher?.Dispose();
             debounce?.Dispose();
+            watcher = null;
+            debounce = null;
             root = full;
             changed = onChanged;
             if (!Directory.Exists(full)) return;
@@ -127,6 +131,7 @@ public sealed class PhotoCatalog : IPhotoCatalog
     {
         lock (sync)
         {
+            if (disposed) return;
             debounce ??= new System.Threading.Timer(_ =>
             {
                 string? path;
@@ -142,6 +147,15 @@ public sealed class PhotoCatalog : IPhotoCatalog
 
     public void Dispose()
     {
-        lock (sync) { watcher?.Dispose(); debounce?.Dispose(); watcher = null; debounce = null; }
+        lock (sync)
+        {
+            disposed = true;
+            root = null;
+            changed = null;
+            watcher?.Dispose();
+            debounce?.Dispose();
+            watcher = null;
+            debounce = null;
+        }
     }
 }

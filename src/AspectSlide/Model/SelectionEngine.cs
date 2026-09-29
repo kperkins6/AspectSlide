@@ -11,23 +11,55 @@ public static class SelectionEngine
         if (valid.Length == 0) return result;
 
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var display in displays.Where(d => d.Width > 0 && d.Height > 0)
-                     .OrderBy(d => valid.Count(p => SameOrientation(d, p))))
+        var remaining = displays.Where(d => d.Width > 0 && d.Height > 0).ToList();
+        while (remaining.Count > 0)
         {
-            var unused = valid.Where(p => !used.Contains(p.Path)).ToArray();
-            var candidates = unused.Length > 0 ? unused : valid;
-            var matching = candidates.Where(p => SameOrientation(display, p)).ToArray();
-            if (matching.Length > 0) candidates = matching;
+            // Assign the display with the largest loss from missing its best image first.
+            var display = remaining.MaxBy(d => OpportunityCost(d, valid, used, fit, history))!;
+            remaining.Remove(display);
+            var candidates = CandidatePool(display, valid, used, history);
+            bool allRecent = candidates.All(p => history.WasRecentlyShown(display.Id, p.Path));
 
             var selected = candidates
                 .Select(p => (Photo: p, Cost: Cost(display, p, fit)
                     + (history.WasRecentlyShown(display.Id, p.Path) && candidates.Length > 1 ? 0.75 : 0)
-                    + random.NextDouble() * 0.000001))
+                    + random.NextDouble() * (allRecent ? 0.25 : 0.000001)))
                 .MinBy(item => item.Cost).Photo;
             result[display.Id] = selected;
             used.Add(selected.Path);
         }
         return result;
+    }
+
+    private static PhotoInfo[] CandidatePool(DisplayInfo display, PhotoInfo[] valid,
+        HashSet<string> used, SelectionHistory history)
+    {
+        var unused = valid.Where(p => !used.Contains(p.Path)).ToArray();
+        var candidates = unused.Length > 0 ? unused : valid;
+        var matching = candidates.Where(p => SameOrientation(display, p)).ToArray();
+        if (matching.Length > 0) candidates = matching;
+        string? last = history.LastShown(display.Id);
+        if (candidates.Length > 1 && last is not null)
+        {
+            var different = candidates.Where(p => !string.Equals(p.Path, last, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (different.Length > 0) candidates = different;
+        }
+        return candidates;
+    }
+
+    private static double OpportunityCost(DisplayInfo display, PhotoInfo[] valid,
+        HashSet<string> used, WallpaperFit fit, SelectionHistory history)
+    {
+        var candidates = CandidatePool(display, valid, used, history);
+        if (candidates.Length == 1) return double.PositiveInfinity;
+        double best = double.PositiveInfinity, second = double.PositiveInfinity;
+        foreach (var photo in candidates)
+        {
+            double cost = Cost(display, photo, fit);
+            if (cost < best) { second = best; best = cost; }
+            else if (cost < second) second = cost;
+        }
+        return second - best;
     }
 
     private static bool SameOrientation(DisplayInfo display, PhotoInfo photo) =>

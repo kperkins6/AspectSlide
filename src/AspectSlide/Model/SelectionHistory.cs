@@ -14,4 +14,7 @@ public sealed class SelectionHistory
 
     public bool WasRecentlyShown(string displayId, string photoPath) =>
         recent.TryGetValue(displayId, out var entries) && entries.Contains(photoPath, StringComparer.OrdinalIgnoreCase);
+
+    public string? LastShown(string displayId) =>
+        recent.TryGetValue(displayId, out var entries) && entries.Count > 0 ? entries.Last() : null;
 }

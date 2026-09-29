@@ -87,6 +87,28 @@ public sealed class PhotoCatalogTests
     }
 
     [Fact]
+    public async Task WatcherContinuesAfterChangingSourceFolders()
+    {
+        using var folder = new TemporaryFolder();
+        string first = System.IO.Path.Combine(folder.Path, "first");
+        string second = System.IO.Path.Combine(folder.Path, "second");
+        Directory.CreateDirectory(first);
+        Directory.CreateDirectory(second);
+        using var catalog = new PhotoCatalog(new FakeProbe());
+        var firstChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        catalog.StartWatching(first, () => firstChanged.TrySetResult());
+        File.WriteAllText(System.IO.Path.Combine(first, "a.jpg"), "a");
+        await firstChanged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var secondChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        catalog.StartWatching(second, () => secondChanged.TrySetResult());
+        File.WriteAllText(System.IO.Path.Combine(second, "b.jpg"), "b");
+        await secondChanged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("b.jpg", System.IO.Path.GetFileName(Assert.Single(catalog.Current).Path));
+    }
+
+    [Fact]
     public void ExifRotationIsReflectedInDimensionsAndCachedWallpaper()
     {
         using var folder = new TemporaryFolder();

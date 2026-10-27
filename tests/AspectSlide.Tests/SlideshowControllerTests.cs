@@ -50,6 +50,166 @@ public sealed class SlideshowControllerTests
     }
 
     [Fact]
+    public async Task EarlyTimerTickRearmsAndChangesAtFiveMinuteDeadline()
+    {
+        using var fixture = new ControllerFixture();
+        await fixture.Controller.ChangeNowAsync();
+        fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+        int armed = fixture.Timer.ArmCount;
+
+        fixture.Clock.UtcNow += TimeSpan.FromMinutes(5) - TimeSpan.FromTicks(1);
+        fixture.Timer.Fire();
+
+        Assert.Equal(armed + 1, fixture.Timer.ArmCount);
+        Assert.Equal(TimeSpan.FromMilliseconds(1), fixture.Timer.LastDelay);
+        Assert.Equal(2, fixture.Platform.Assignments.Count);
+
+        var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Controller.StatusChanged += () =>
+        {
+            if (fixture.Platform.Assignments.Count == 4) changed.TrySetResult();
+        };
+        fixture.Clock.UtcNow += TimeSpan.FromTicks(1);
+        fixture.Timer.Fire();
+        await changed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(4, fixture.Platform.Assignments.Count);
+    }
+
+    [Fact]
+    public async Task IntervalEditDuringAnInFlightChangeKeepsItsFiveMinuteDeadline()
+    {
+        using var fixture = new ControllerFixture();
+        await fixture.Controller.ChangeNowAsync();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            return null;
+        };
+
+        Task inFlight = fixture.Controller.ChangeNowAsync();
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+            fixture.Clock.UtcNow += TimeSpan.FromMinutes(1);
+        }
+        finally { release.Set(); }
+        await inFlight;
+
+        Assert.Equal(TimeSpan.FromMinutes(4), fixture.Timer.LastDelay);
+    }
+
+    [Fact]
+    public async Task IntervalEditDuringFailedWallpaperWritesStillRetriesInOneMinute()
+    {
+        using var fixture = new ControllerFixture();
+        fixture.Platform.FailAll = true;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            return null;
+        };
+
+        Task inFlight = fixture.Controller.ChangeNowAsync();
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+        }
+        finally { release.Set(); }
+        await inFlight;
+
+        Assert.Equal(TimeSpan.FromMinutes(1), fixture.Timer.LastDelay);
+    }
+
+    [Fact]
+    public async Task IntervalEditDuringExhaustedImagePreparationStillRetriesInOneMinute()
+    {
+        using var fixture = new ControllerFixture();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            throw new IOException("Image cannot be prepared.");
+        };
+
+        Task inFlight = fixture.Controller.ChangeNowAsync();
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+        }
+        finally { release.Set(); }
+        await inFlight;
+
+        Assert.Equal(TimeSpan.FromMinutes(1), fixture.Timer.LastDelay);
+    }
+
+    [Fact]
+    public async Task PassedEditedDeadlineDuringAutomaticBatchLeavesATimerArmed()
+    {
+        using var fixture = new ControllerFixture();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            return null;
+        };
+
+        Task automatic = fixture.Controller.OnTimerAsync();
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+            fixture.Clock.UtcNow += TimeSpan.FromMinutes(6);
+            fixture.Timer.FireWhenZero = true;
+        }
+        finally { release.Set(); }
+        await automatic;
+
+        Assert.True(fixture.Timer.IsArmed);
+        Assert.True(fixture.Timer.LastDelay > TimeSpan.Zero);
+        Assert.Equal(2, fixture.Platform.Assignments.Count);
+    }
+
+    [Fact]
+    public async Task TimerTickDuringAutomaticBatchIsRearmedAfterBatchCompletes()
+    {
+        using var fixture = new ControllerFixture();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        fixture.Preparer.OnPrepare = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            return null;
+        };
+
+        Task automatic = fixture.Controller.OnTimerAsync();
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            fixture.Controller.UpdateInterval(TimeSpan.FromMinutes(5));
+            fixture.Timer.FireOnNextArm = true;
+        }
+        finally { release.Set(); }
+        await automatic;
+
+        Assert.True(fixture.Timer.IsArmed);
+    }
+
+    [Fact]
     public async Task PauseBlocksAutomaticTickButAllowsManualChange()
     {
         using var fixture = new ControllerFixture();
@@ -358,6 +518,7 @@ public sealed class SlideshowControllerTests
         public FakeProbe Probe { get; } = new();
         public CountingCatalog Catalog { get; }
         public FakeTimer Timer { get; } = new();
+        public FakeClock Clock { get; } = new();
         public SlideshowController Controller { get; }
         public string BeforeWide => Path.Combine(folder.Path, "before-wide.jpg");
 
@@ -375,7 +536,7 @@ public sealed class SlideshowControllerTests
             Controller = new SlideshowController(Settings,
                 new SettingsStore(Path.Combine(folder.Path, "settings.json")),
                 Catalog, Preparer, Platform,
-                new FakeClock(), Timer, new SynchronizationContext());
+                Clock, Timer, new SynchronizationContext());
         }
         public void Dispose() { Controller.Stop(); folder.Dispose(); }
     }
@@ -450,9 +611,22 @@ public sealed class SlideshowControllerTests
     private sealed class FakeClock : IClock { public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow; }
     public sealed class FakeTimer : IAppTimer
     {
+        private Action? tick;
         public TimeSpan LastDelay { get; private set; }
         public int ArmCount { get; private set; }
-        public void Arm(TimeSpan delay, Action tick) { LastDelay = delay; ArmCount++; }
+        public bool FireWhenZero { get; set; }
+        public bool FireOnNextArm { get; set; }
+        public bool IsArmed => tick is not null;
+        public void Arm(TimeSpan delay, Action tick)
+        {
+            LastDelay = delay;
+            ArmCount++;
+            this.tick = tick;
+            if (!FireOnNextArm && !(FireWhenZero && delay == TimeSpan.Zero)) return;
+            FireOnNextArm = false;
+            Fire();
+        }
+        public void Fire() { Action? callback = tick; tick = null; callback?.Invoke(); }
         public void Dispose() { }
     }
 }

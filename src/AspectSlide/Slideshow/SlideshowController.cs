@@ -24,6 +24,7 @@ public sealed class SlideshowController
     private DateTimeOffset nextDue;
     private DateTimeOffset lastFullScan;
     private int generation;
+    private int intervalRevision;
     private int displayChangeGeneration;
     private bool automaticInProgress;
     private bool stopped;
@@ -69,7 +70,7 @@ public sealed class SlideshowController
                 lastFullScan = DateTimeOffset.MinValue;
                 catalog.StartWatching(root, () => SetStatus("Photo library updated."));
                 SetStatus("Photo folder is unavailable.");
-                nextDue = clock.UtcNow + TimeSpan.FromMinutes(1);
+                lock (stateSync) nextDue = clock.UtcNow + TimeSpan.FromMinutes(1);
                 ArmTimer();
                 return;
             }
@@ -97,7 +98,7 @@ public sealed class SlideshowController
         return StartAsync();
     }
 
-    public Task ChangeNowAsync() => ChangeAsync(manual: true);
+    public Task ChangeNowAsync() => ChangeAsync(manual: true, ArmTimer);
     public Task OnTimerAsync() => RequestAutomaticAsync(force: false);
     public Task OnResumeAsync() => RequestAutomaticAsync(force: false);
 
@@ -121,13 +122,21 @@ public sealed class SlideshowController
 
     private async Task RequestAutomaticAsync(bool force)
     {
+        bool early;
         lock (stateSync)
         {
-            if (stopped || settings.Paused || automaticInProgress || (!force && clock.UtcNow < nextDue)) return;
-            automaticInProgress = true;
+            if (stopped || settings.Paused || automaticInProgress) return;
+            early = !force && clock.UtcNow < nextDue;
+            if (!early) automaticInProgress = true;
         }
-        try { await ChangeAsync(manual: false); }
-        finally { lock (stateSync) automaticInProgress = false; }
+        if (early) { ArmTimer(); return; }
+        bool rearmAfterChange = false;
+        try { await ChangeAsync(manual: false, () => rearmAfterChange = true); }
+        finally
+        {
+            lock (stateSync) automaticInProgress = false;
+            if (rearmAfterChange) ArmTimer();
+        }
     }
 
     public void SetPaused(bool paused)
@@ -148,19 +157,25 @@ public sealed class SlideshowController
     {
         if (interval < TimeSpan.FromMinutes(1) || interval > TimeSpan.FromHours(24))
             throw new ArgumentOutOfRangeException(nameof(interval));
-        settings.Interval = interval;
-        nextDue = clock.UtcNow + interval;
+        lock (stateSync)
+        {
+            settings.Interval = interval;
+            nextDue = clock.UtcNow + interval;
+            intervalRevision++;
+        }
         store.Save(settings);
         ArmTimer();
     }
 
-    private async Task ChangeAsync(bool manual)
+    private async Task ChangeAsync(bool manual, Action scheduleTimer)
     {
         int version;
+        int startingIntervalRevision;
         lock (stateSync)
         {
             if (stopped || (!manual && settings.Paused)) return;
             version = generation;
+            startingIntervalRevision = intervalRevision;
         }
         await gate.WaitAsync();
         bool scheduled = false;
@@ -283,8 +298,17 @@ public sealed class SlideshowController
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
                 { /* An incomplete active-path list must never drive cache deletion. */ }
-                nextDue = clock.UtcNow + (failedDisplays.Count == chosen.Count ? TimeSpan.FromMinutes(1) : settings.Interval);
-                ArmTimer();
+                lock (stateSync)
+                {
+                    bool allFailed = failedDisplays.Count == chosen.Count;
+                    DateTimeOffset now = clock.UtcNow;
+                    DateTimeOffset due = now + (allFailed ? TimeSpan.FromMinutes(1) : settings.Interval);
+                    if (intervalRevision == startingIntervalRevision)
+                        nextDue = due;
+                    else if (nextDue <= now || (allFailed && nextDue > due))
+                        nextDue = due;
+                }
+                scheduleTimer();
                 scheduled = true;
                 SetStatus(failedDisplays.Count == 0 ? $"Changed {chosen.Count} wallpaper(s)." :
                     "Could not update monitor(s): " + string.Join(", ", failedDisplays));
@@ -296,11 +320,19 @@ public sealed class SlideshowController
         { SetStatus(ex.Message); }
         finally
         {
-            if (!scheduled && !nativeConflict && !stopped && !settings.Paused && settings.Folder is not null)
+            bool retry;
+            lock (stateSync)
             {
-                nextDue = clock.UtcNow + TimeSpan.FromMinutes(1);
-                ArmTimer();
+                retry = !scheduled && !nativeConflict && !stopped && !settings.Paused && settings.Folder is not null;
+                if (retry)
+                {
+                    DateTimeOffset now = clock.UtcNow;
+                    DateTimeOffset due = now + TimeSpan.FromMinutes(1);
+                    if (intervalRevision == startingIntervalRevision || nextDue <= now || nextDue > due)
+                        nextDue = due;
+                }
             }
+            if (retry) scheduleTimer();
             gate.Release();
         }
     }
@@ -333,10 +365,15 @@ public sealed class SlideshowController
 
     private void ArmTimer()
     {
-        if (stopped || settings.Paused) return;
-        TimeSpan delay = nextDue - clock.UtcNow;
-        if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
-        timer.Arm(delay, () => _ = OnTimerAsync());
+        lock (stateSync)
+        {
+            if (stopped || settings.Paused) return;
+            TimeSpan delay = nextDue - clock.UtcNow;
+            if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+            else if (delay > TimeSpan.Zero && delay < TimeSpan.FromMilliseconds(1))
+                delay = TimeSpan.FromMilliseconds(1);
+            timer.Arm(delay, () => _ = OnTimerAsync());
+        }
     }
 
     private void TrackFolder(string root)

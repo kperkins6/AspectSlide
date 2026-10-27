@@ -12,18 +12,22 @@ public sealed class SettingsFormActionTests
     public async Task EverySettingsActionIsWiredWithoutTouchingTheRealDesktop()
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stages = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var thread = new Thread(() =>
         {
-            try { ExerciseActions(); completion.SetResult(); }
+            try { ExerciseActions(stages.Enqueue); completion.SetResult(); }
             catch (Exception ex) { completion.SetException(ex); }
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        await completion.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        try { await completion.Task.WaitAsync(TimeSpan.FromSeconds(20)); }
+        catch (TimeoutException ex)
+        { throw new TimeoutException("Settings test stalled after: " + string.Join(", ", stages), ex); }
     }
 
-    private static void ExerciseActions()
+    private static void ExerciseActions(Action<string> mark)
     {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException, threadScope: true);
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
         using var folder = new TemporaryFolder();
         using var nextFolder = new TemporaryFolder();
@@ -31,45 +35,65 @@ public sealed class SettingsFormActionTests
         string tall = Path.Combine(folder.Path, "tall.jpg");
         string beforeWide = Path.Combine(folder.Path, "before-wide.jpg");
         string beforeTall = Path.Combine(folder.Path, "before-tall.jpg");
-        foreach (string path in new[] { wide, tall, beforeWide, beforeTall }) File.WriteAllText(path, "test");
+        using (var image = new Bitmap(2, 2))
+            foreach (string path in new[] { wide, tall, beforeWide, beforeTall })
+                image.Save(path, System.Drawing.Imaging.ImageFormat.Jpeg);
         var settings = new AppSettings { Folder = folder.Path };
         var store = new SettingsStore(Path.Combine(folder.Path, "settings.json"));
         var platform = new FakePlatform(beforeWide, beforeTall);
         using var catalog = new FakeCatalog([new(wide, 1920, 1080), new(tall, 1080, 1920)]);
         var controller = new SlideshowController(settings, store, catalog, new FakePreparer(), platform,
-            new SystemClock(), new FakeTimer(), new SynchronizationContext());
+            new SystemClock(), new FakeTimer(), SynchronizationContext.Current!);
         var opened = new List<string>();
         int exits = 0;
-        using var form = new SettingsForm(settings, store, controller,
+        var uiExceptions = new List<Exception>();
+        var reportedErrors = new List<Exception>();
+        System.Threading.ThreadExceptionEventHandler onThreadException = (_, args) => uiExceptions.Add(args.Exception);
+        var form = new SettingsForm(settings, store, controller,
             new StartupShortcut(folder.Path, Path.Combine(folder.Path, "AspectSlide.exe")), platform,
-            () => exits++, uri => { opened.Add(uri); return Task.CompletedTask; }, _ => nextFolder.Path)
+            () => exits++, uri => { opened.Add(uri); return Task.CompletedTask; }, _ => nextFolder.Path,
+            ex => reportedErrors.Add(ex))
         { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-10000, -10000) };
         try
         {
+            Application.ThreadException += onThreadException;
             form.Show();
+            form.RefreshStatus();
+            form.Hide();
+            form.Show();
+            mark("shown");
             Click(form, "Change now");
             PumpUntil(() => platform.Writes >= 2);
+            mark("changed now");
             Click(form, "Check again");
             PumpUntil(() => platform.Writes >= 4);
+            mark("checked again");
 
             Click(form, "Pause");
+            Assert.True(reportedErrors.Count == 0, string.Join(Environment.NewLine, reportedErrors));
             Assert.True(settings.Paused);
             Click(form, "Resume");
             Assert.False(settings.Paused);
+            mark("pause and resume");
 
             Click(form, "Restore previous");
             PumpUntil(() => settings.Paused && platform.Wallpapers["wide"] == beforeWide && platform.Wallpapers["tall"] == beforeTall);
             Assert.Equal(beforeTall, platform.Wallpapers["tall"]);
+            mark("restored");
 
+            mark("before Windows colors");
             Click(form, "Windows colors");
+            mark("opened Windows colors");
             Click(form, "Windows background");
             Assert.Equal(["ms-settings:colors", "ms-settings:personalization-background"], opened);
+            mark("opened Windows settings links");
 
             var fit = Find<ComboBox>(form).Single();
             fit.SelectedIndex = 1;
             Assert.Equal(WallpaperFit.Fit, settings.Fit);
             Find<NumericUpDown>(form).Single().Value = 5;
             Assert.Equal(TimeSpan.FromMinutes(5), settings.Interval);
+            mark("set five minutes");
 
             var signIn = Find<CheckBox>(form).Single();
             signIn.Checked = true;
@@ -77,20 +101,31 @@ public sealed class SettingsFormActionTests
             Assert.True(File.Exists(Path.Combine(folder.Path, "AspectSlide.lnk")));
             signIn.Checked = false;
             Assert.False(settings.StartAtSignIn);
+            mark("toggled sign in");
 
             Click(form, "Browse");
             PumpUntil(() => settings.Folder == nextFolder.Path);
+            mark("changed folder");
             Click(form, "Exit");
             Assert.Equal(1, exits);
+            mark("clicked exit");
         }
-        finally { controller.Stop(); form.Hide(); }
+        finally
+        {
+            controller.Stop();
+            mark("stopped controller");
+            form.Dispose();
+            mark("disposed form");
+            Application.ThreadException -= onThreadException;
+        }
+        Assert.Empty(uiExceptions);
+        Assert.Empty(reportedErrors);
     }
 
     private static void Click(Form form, string text)
     {
         var button = Find<Button>(form).Single(b => b.Text.StartsWith(text, StringComparison.Ordinal));
         button.PerformClick();
-        Application.DoEvents();
     }
 
     private static IEnumerable<T> Find<T>(Control parent) where T : Control

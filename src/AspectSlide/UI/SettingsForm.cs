@@ -16,6 +16,7 @@ public sealed class SettingsForm : Form
     private readonly Action exit;
     private readonly Func<string, Task> launchWindowsSettings;
     private readonly Func<IWin32Window, string?> selectFolder;
+    private readonly Action<Exception> reportError;
     private readonly TextBox folderText = new() { ReadOnly = true, Dock = DockStyle.Fill };
     private readonly NumericUpDown minutes = new() { Minimum = 1, Maximum = 1440, Dock = DockStyle.Left, Width = 90 };
     private readonly ComboBox fit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left, Width = 100 };
@@ -28,7 +29,8 @@ public sealed class SettingsForm : Form
 
     public SettingsForm(AppSettings settings, SettingsStore store, SlideshowController controller,
         StartupShortcut startup, IWallpaperPlatform platform, Action exit,
-        Func<string, Task>? launchWindowsSettings = null, Func<IWin32Window, string?>? selectFolder = null)
+        Func<string, Task>? launchWindowsSettings = null, Func<IWin32Window, string?>? selectFolder = null,
+        Action<Exception>? reportError = null)
     {
         this.settings = settings;
         this.store = store;
@@ -38,6 +40,7 @@ public sealed class SettingsForm : Form
         this.exit = exit;
         this.launchWindowsSettings = launchWindowsSettings ?? OpenWindowsSettings;
         this.selectFolder = selectFolder ?? PickFolder;
+        this.reportError = reportError ?? (ex => MessageBox.Show(this, ex.Message, "AspectSlide", MessageBoxButtons.OK, MessageBoxIcon.Warning));
         Text = "AspectSlide settings";
         MinimumSize = new Size(570, 530);
         Size = new Size(660, 600);
@@ -230,8 +233,11 @@ public sealed class SettingsForm : Form
 
     private void DisposePreviews()
     {
+        if (Disposing || IsDisposed || monitors.Disposing || monitors.IsDisposed) return;
         foreach (Control card in monitors.Controls.Cast<Control>().ToArray())
         {
+            if (card.Disposing || card.IsDisposed) continue;
+            if (card.Parent == monitors) monitors.Controls.Remove(card);
             foreach (var preview in card.Controls.OfType<PictureBox>())
             {
                 Image? image = preview.Image;
@@ -240,7 +246,6 @@ public sealed class SettingsForm : Form
             }
             card.Dispose();
         }
-        monitors.Controls.Clear();
     }
 
     private async Task ChangeNowWithWarningAsync()
@@ -263,5 +268,5 @@ public sealed class SettingsForm : Form
         return Task.CompletedTask;
     }
 
-    private void ShowError(Exception ex) => MessageBox.Show(this, ex.Message, "AspectSlide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    private void ShowError(Exception ex) => reportError(ex);
 }

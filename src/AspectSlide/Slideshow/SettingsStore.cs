@@ -5,6 +5,7 @@ namespace AspectSlide.Slideshow;
 public sealed class SettingsStore
 {
     private readonly string path;
+    private readonly object sync = new();
     public SettingsStore(string path) => this.path = path;
 
     public AppSettings Load()
@@ -27,14 +28,17 @@ public sealed class SettingsStore
 
     public void Save(AppSettings settings)
     {
-        string directory = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(directory);
-        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
+        lock (sync)
         {
-            File.WriteAllText(temporary, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(temporary, path, overwrite: true);
+            string directory = Path.GetDirectoryName(path)!;
+            Directory.CreateDirectory(directory);
+            string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(temporary, path, overwrite: true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 }
